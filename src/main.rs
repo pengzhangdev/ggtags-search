@@ -311,7 +311,7 @@ fn parse_args() -> OpengrokArgs {
     let matches = App::new("opengrok-search")
                         .version("1.0")
                         .author("Werther Zhang")
-                        .about("Search opengrok restfully")
+                        .about("Search ggtags database. All the source codes are in Apache License v2.0.")
                         .arg(Arg::with_name("config")
                                 .short("c")
                                 .long("config")

@@ -5,6 +5,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
+use std::thread;
+use std::sync::Arc;
+use threadpool::ThreadPool;
 
 // testcases/open_posix_testsuite/conformance/interfaces/pthread_mutexattr_setprotocol/3-2.c:23: int main(void)
 
@@ -18,59 +23,7 @@ struct OpengrokArgs {
     filename : String,
     workfile : String,
 }
-/*
- char *
- uncompress(const char *in, const char *name)
- {
-     STATIC_STRBUF(sb);
-     const char *p;
-     int i;
- 
-     strbuf_clear(sb);
-     for (p = in;  *p; p++) {
-         if (*p == '@') {
-             int spaces = 0;
- 
-             switch (*++p) {
-             case '@':
-                 strbuf_putc(sb, '@');
-                 break;
-             case 'n':
-                 strbuf_puts(sb, name);
-                 break;
-             case '{':   /* } */
-                 for (p++; *p && isdigit((unsigned char)*p); p++)
-                     spaces = spaces * 10 + *p - '0';
-                 break;
-             case '0':
-             case '1':
-             case '2':
-             case '3':
-             case '4':
-             case '5':
-             case '6':
-             case '7':
-             case '8':
-             case '9':
-                 spaces = *p - '0';
-                 break;
-             default:
-                 if (*p < 'a' || *p > 'z')
-                     die("Abbrev character must be a lower alphabetic character. (%c)", *p);
-                 i = *p - 'a';
-                 if (ab2name[i].name)
-                     strbuf_puts(sb, ab2name[i].name);
-                 break;
-                         }
-             strbuf_nputc(sb, ' ', spaces);
-         } else {
-             strbuf_putc(sb, *p);
-         }
-     }
-     return strbuf_value(sb);
- }
 
-*/
 fn uncompress(name : &String, inbuf : &String) -> String {
     let mut result = String::new();
 
@@ -158,28 +111,41 @@ fn sqlite_get_define(dbpath : &str, key : String, pattern : bool) -> Result<Vec<
     let sqlquery = format!("SELECT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
     let conn = Connection::open(get_fullpath(dbpath, "GTAGS"))?;
     let mut stmt = conn.prepare(&sqlquery)?;
+    let pool = ThreadPool::new(num_cpus::get());
+    let (tx, rx): (Sender<XrefInfo>, Receiver<XrefInfo>) = mpsc::channel();
     let XrefInfos = stmt.query_map([], |row| {
+        let thread_tx = tx.clone();
         let value  : String = row.get(1)?;
         let key : String = row.get(0)?;
-        //println!("define {} = {}", key, uncompress(&key, &value));
-        let line = uncompress(&key, &value);
-        let v : Vec<&str> = line.split(&key).collect();
-        let path = &sqlite_get_file(dbpath, v[0].to_string(), false).unwrap()[0];
-        let path = get_fullpath(dbpath, path);
-        let linum = v[1].trim().split(" ").collect::<Vec<&str>>()[0].trim();
-        let l = line.replace(&format!("{}{} {}", v[0], key, linum), &(path.clone() + ":" + linum + ":"));
+        {
+            let dbpath = dbpath.to_owned();
+            //println!("define {} = {}", key, uncompress(&key, &value));
+            pool.execute(move || {
+                let line = uncompress(&key, &value);
+                let v : Vec<&str> = line.split(&key).collect();
+                let path = &sqlite_get_file(&dbpath, v[0].to_string(), false).unwrap()[0];
+                let path = get_fullpath(&dbpath, path);
+                let linum = v[1].trim().split(" ").collect::<Vec<&str>>()[0].trim();
+                let l = line.replace(&format!("{}{} {}", v[0], key, linum), &(path.clone() + ":" + linum + ":"));
 
-        Ok ( XrefInfo { 
-            line : l,
-            filepath : path.to_string(),
-            priority : 0
-        })
+                thread_tx.send( XrefInfo { 
+                    line : l,
+                    filepath : path.to_string(),
+                    priority : 0
+                }).unwrap();
+            });
+            Ok(())
+        }
     })?;
+
+    for xf in XrefInfos { // trigger the closure
+
+    }
     
+    drop(tx);
     let mut result : Vec<XrefInfo> = Vec::new();
-    for info in XrefInfos {
-        //println!("xrefs {:?}", info);
-        result.push(info.unwrap());
+    for info in rx {
+        result.push(info);
     }
 
     Ok(result)
@@ -196,64 +162,78 @@ fn sqlite_get_symbol_line(reader : &mut std::io::BufReader<std::fs::File>, offse
 }
 
 fn sqlite_get_symbol(dbpath : &str, key : String, pattern : bool) -> Result<Vec<XrefInfo>> {
+    //let sy_time = SystemTime::now();
     let sqlquery = format!("SELECT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
     let conn = Connection::open(get_fullpath(dbpath, "GRTAGS"))?;
     let mut stmt = conn.prepare(&sqlquery)?;
-    let mut result : Vec<XrefInfo> = Vec::new();
+    let pool = ThreadPool::new(num_cpus::get());
+    let (tx, rx): (Sender<XrefInfo>, Receiver<XrefInfo>) = mpsc::channel();
     let XrefInfos = stmt.query_map([], |row| {
-        let value : String = row.get(1)?;
-        let key : String = row.get(0)?;
-        let s = uncompress(&key, &value);
-        //println!("symbol {} = {}", key, uncompress(&key, &value));
-        let v : Vec<&str> = s.split(&key).collect();
-        //println!("{:?}  key {:?}", v, key);
-        let path = &sqlite_get_file(dbpath, v[0].to_string(), false).unwrap()[0];
-        let path = get_fullpath(dbpath, path);
-        //let abspath = Path::new(dbpath).join(path).canonicalize().unwrap();
-        let mut reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        let thread_tx = tx.clone();
+        let value : String = row.get(1).unwrap();
+        let key : String = row.get(0).unwrap();
+        {
+            //println!("{:?}  key {:?}", v, key);
+                //let abspath = Path::new(dbpath).join(path).canonicalize().unwrap();
+            let dbpath = dbpath.to_owned(); // own dbpath
+            pool.execute(move || {
+                            //println!("symbol {} = {}", key, uncompress(&key, &value));
+                let s = uncompress(&key, &value);
+                let v : Vec<&str> = s.split(&key).collect();
+                let path = &sqlite_get_file(&dbpath, v[0].to_string(), false).unwrap()[0];
+                let path = get_fullpath(&dbpath, path);
+                let mut reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+                let v : Vec<&str> = v[1].trim().split(",").collect();
+                let mut next = 0;
 
-
-        let v : Vec<&str> = v[1].trim().split(",").collect();
-        let mut next = 0;
-        for o in v {
-            if o.find('-') != None {
-                let ov : Vec<&str> = o.split("-").collect();
-                let oo = ov[0];
-                let os = ov[1];
-                next += oo.parse::<i32>().unwrap();
-                let line = sqlite_get_symbol_line(&mut reader, oo.parse::<i32>().unwrap());
-                result.push(XrefInfo {
-                    filepath : format!("{}:{}", path, next),
-                    line : format!("{}:{}:{}", path, next, line),
-                    priority : 0,
-                });
-                for i in 1 .. (os.parse::<i32>().unwrap() + 1) {
-                    //println!("i = {}", i);
-                    next += i;
-                    let line = sqlite_get_symbol_line(&mut reader, i);
-                    result.push(XrefInfo {
-                        filepath : format!("{}:{}", path, next),
-                        line : format!("{}:{}:{}", path, next, line),
-                        priority : 0,
-                    });
+                for o in v {
+                    if o.find('-') != None {
+                        let ov : Vec<&str> = o.split("-").collect();
+                        let oo = ov[0];
+                        let os = ov[1];
+                        next += oo.parse::<i32>().unwrap();
+                        let line = sqlite_get_symbol_line(&mut reader, oo.parse::<i32>().unwrap());
+                        thread_tx.send(XrefInfo {
+                            filepath : format!("{}:{}", path, next),
+                            line : format!("{}:{}:{}", path, next, line),
+                            priority : 0,
+                        }).unwrap();
+                        for i in 1 .. (os.parse::<i32>().unwrap() + 1) {
+                            //println!("i = {}", i);
+                            next += i;
+                            let line = sqlite_get_symbol_line(&mut reader, i);
+                            thread_tx.send(XrefInfo {
+                                filepath : format!("{}:{}", path, next),
+                                line : format!("{}:{}:{}", path, next, line),
+                                priority : 0,
+                            }).unwrap();
+                        }
+                    } else {
+                        next += o.parse::<i32>().unwrap();
+                        let line = sqlite_get_symbol_line(&mut reader, o.parse::<i32>().unwrap());
+                        //println!("tx send");
+                        thread_tx.send(XrefInfo {
+                            filepath : format!("{}:{}", path, next),
+                            line : format!("{}:{}:{}", path, next, line),
+                            priority : 0,
+                        }).unwrap();
+                    }
                 }
-            } else {
-                next += o.parse::<i32>().unwrap();
-                let line = sqlite_get_symbol_line(&mut reader, o.parse::<i32>().unwrap());
-                result.push(XrefInfo {
-                    filepath : format!("{}:{}", path, next),
-                    line : format!("{}:{}:{}", path, next, line),
-                    priority : 0,
-                });
-            }
-
+            });
         }
         Ok(())
     })?;
     for info in XrefInfos {
         //println!("xrefs {:?}", info);
     }
-
+    drop(tx);
+    let mut result : Vec<XrefInfo> = Vec::new();
+    for xref in rx {
+        //println!("rx receive");
+        result.push(xref);
+    }
+    //let duration = SystemTime::now().duration_since(sy_time).unwrap();
+    //println!("Time cost in sqlite_get_symbol : {:?} s", duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9);
     Ok(result)
 }
 
@@ -303,16 +283,27 @@ fn cal_prio(target : &str, wd : &str) -> i32 {
 
 fn sort_with_prio(xrefs : Vec<XrefInfo>, wd : String) -> Vec<XrefInfo> {
     //println!("{}", levenshtein::levenshtein("aca", "bbbc"))
-    let sy_time = SystemTime::now();
+    //let sy_time = SystemTime::now();
     let mut result : Vec<XrefInfo> = Vec::new();
+    let pool = ThreadPool::new(num_cpus::get());
+    let (tx, rx): (Sender<XrefInfo>, Receiver<XrefInfo>) = mpsc::channel();
     for mut xref in xrefs {
-        xref.priority = cal_prio(&xref.filepath, &wd);
+        let wd = wd.clone();
+        let thread_tx = tx.clone();
+        pool.execute(move || {
+            xref.priority = cal_prio(&xref.filepath, &wd);
+            thread_tx.send(xref).unwrap();
+        });
+        //result.push(xref);
+    }
+    drop(tx);
+    for xref in rx {
         result.push(xref);
     }
     result.sort_by(|a, b| b.priority.cmp(&a.priority));
     result.reverse();
-    let duration = SystemTime::now().duration_since(sy_time).unwrap();
-    println!("Time cost in sort_with_prio : {:?} s", duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9);
+    //let duration = SystemTime::now().duration_since(sy_time).unwrap();
+    //println!("Time cost in sort_with_prio : {:?} s", duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9);
     return result;
 }
 

@@ -72,8 +72,9 @@ fn uncompress(name : &String, inbuf : &String) -> String {
 #[derive(Debug)]
 struct XrefInfo {
     filepath : String,
+    linum : i64,
     line : String,
-    priority : i32,
+    priority : i64,
 }
 
 fn pattern_query(key : &str, pattern : bool) -> String {
@@ -130,6 +131,7 @@ fn sqlite_get_define(dbpath : &str, key : String, pattern : bool) -> Result<Vec<
 
                 thread_tx.send( XrefInfo { 
                     line : l,
+                    linum : linum.parse::<i64>().unwrap(),
                     filepath : path.to_string(),
                     priority : 0
                 }).unwrap();
@@ -184,37 +186,40 @@ fn sqlite_get_symbol(dbpath : &str, key : String, pattern : bool) -> Result<Vec<
                 let path = get_fullpath(&dbpath, path);
                 let mut reader = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
                 let v : Vec<&str> = v[1].trim().split(",").collect();
-                let mut next = 0;
+                let mut next : i64 = 0;
 
                 for o in v {
                     if o.find('-') != None {
                         let ov : Vec<&str> = o.split("-").collect();
                         let oo = ov[0];
                         let os = ov[1];
-                        next += oo.parse::<i32>().unwrap();
+                        next += oo.parse::<i64>().unwrap();
                         let line = sqlite_get_symbol_line(&mut reader, oo.parse::<i32>().unwrap());
                         thread_tx.send(XrefInfo {
                             filepath : format!("{}:{}", path, next),
+                            linum : next,
                             line : format!("{}:{}:{}", path, next, line),
                             priority : 0,
                         }).unwrap();
                         for i in 1 .. (os.parse::<i32>().unwrap() + 1) {
-                            //println!("i = {}", i);
-                            next += i;
-                            let line = sqlite_get_symbol_line(&mut reader, i);
+                            //println!("line {} oo = {} i = {}", path, oo.parse::<i64>().unwrap(), 1);
+                            next += i as i64;
+                            let line = sqlite_get_symbol_line(&mut reader, 1);
                             thread_tx.send(XrefInfo {
                                 filepath : format!("{}:{}", path, next),
                                 line : format!("{}:{}:{}", path, next, line),
+                                linum : next,
                                 priority : 0,
                             }).unwrap();
                         }
                     } else {
-                        next += o.parse::<i32>().unwrap();
+                        next += o.parse::<i64>().unwrap();
                         let line = sqlite_get_symbol_line(&mut reader, o.parse::<i32>().unwrap());
                         //println!("tx send");
                         thread_tx.send(XrefInfo {
                             filepath : format!("{}:{}", path, next),
                             line : format!("{}:{}:{}", path, next, line),
+                            linum : next,
                             priority : 0,
                         }).unwrap();
                     }
@@ -252,11 +257,11 @@ fn levenshtein_distance(s : &str, t : &str, ignore_case : bool) -> usize {
     }
 }
 
-fn cal_prio(target : &str, wd : &str) -> i32 {
-    let mut matched : i32 = 0;
+fn cal_prio(target : &str, wd : &str) -> i64 {
+    let mut matched : i64 = 0;
     if wd.len() > 0 {
         let count = std::cmp::min(wd.len(), target.len());
-        while matched < count as i32 {
+        while matched < count as i64 {
             if wd.chars().nth(matched as usize) == target.chars().nth(matched as usize) {
                 break;
             }
@@ -266,12 +271,12 @@ fn cal_prio(target : &str, wd : &str) -> i32 {
         if matched != 0 {  // sufix + 100
             
             matched = matched * 10 - levenshtein_distance(Path::new(&wd).file_name().unwrap().to_str().unwrap(), 
-                                                            Path::new(&target).file_name().unwrap().to_str().unwrap(), false) as i32;
+                                                            Path::new(&target).file_name().unwrap().to_str().unwrap(), false) as i64;
         } else {
-            matched = matched * 10 - levenshtein_distance(&wd, &target, false) as i32
+            matched = matched * 10 - levenshtein_distance(&wd, &target, false) as i64
         }
     } else {
-        matched = target.len() as i32;
+        matched = target.len() as i64;
     }
 
     if target.to_lowercase().find("/test") != None {
@@ -291,7 +296,7 @@ fn sort_with_prio(xrefs : Vec<XrefInfo>, wd : String) -> Vec<XrefInfo> {
         let wd = wd.clone();
         let thread_tx = tx.clone();
         pool.execute(move || {
-            xref.priority = cal_prio(&xref.filepath, &wd);
+            xref.priority = cal_prio(&xref.filepath, &wd) * 1000000 + xref.linum;
             thread_tx.send(xref).unwrap();
         });
         //result.push(xref);

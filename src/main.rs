@@ -109,7 +109,7 @@ fn sqlite_get_file(dbpath : &str, key : String, pattern : bool) -> Result<Vec<St
 }
 
 fn sqlite_get_define(dbpath : &str, key : String, pattern : bool) -> Result<Vec<XrefInfo>> {
-    let sqlquery = format!("SELECT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
+    let sqlquery = format!("SELECT DISTINCT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
     let conn = Connection::open(get_fullpath(dbpath, "GTAGS"))?;
     let mut stmt = conn.prepare(&sqlquery)?;
     let pool = ThreadPool::new(num_cpus::get());
@@ -165,7 +165,7 @@ fn sqlite_get_symbol_line(reader : &mut std::io::BufReader<std::fs::File>, offse
 
 fn sqlite_get_symbol(dbpath : &str, key : String, pattern : bool) -> Result<Vec<XrefInfo>> {
     //let sy_time = SystemTime::now();
-    let sqlquery = format!("SELECT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
+    let sqlquery = format!("SELECT DISTINCT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
     let conn = Connection::open(get_fullpath(dbpath, "GRTAGS"))?;
     let mut stmt = conn.prepare(&sqlquery)?;
     let pool = ThreadPool::new(num_cpus::get());

@@ -69,7 +69,7 @@ fn uncompress(name : &String, inbuf : &String) -> String {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct XrefInfo {
     filepath : String,
     linum : i64,
@@ -307,6 +307,7 @@ fn sort_with_prio(xrefs : Vec<XrefInfo>, wd : String) -> Vec<XrefInfo> {
     }
     result.sort_by(|a, b| b.priority.cmp(&a.priority));
     result.reverse();
+    result.dedup();
     //let duration = SystemTime::now().duration_since(sy_time).unwrap();
     //println!("Time cost in sort_with_prio : {:?} s", duration.as_secs() as f64 + duration.subsec_nanos() as f64 * 1e-9);
     return result;

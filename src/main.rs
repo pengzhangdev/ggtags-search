@@ -108,6 +108,41 @@ fn sqlite_get_file(dbpath : &str, key : String, pattern : bool) -> Result<Vec<St
     Ok(result)
 }
 
+fn sqlite_get_file2(dbpath : &str, key : String, pattern : bool) -> Result<Vec<String>> {
+    let sqlquery = format!("SELECT KEY FROM db WHERE KEY {}", pattern_query(key.trim(), pattern));
+    //println!("{}", sqlquery);
+    let conn = Connection::open(get_fullpath(dbpath, "GPATH"))?;
+    let mut stmt = conn.prepare(&sqlquery)?;
+    let mut files = stmt.query_map([], |row| {
+        let value : String = row.get(0)?;
+        Ok(value)
+    })?;
+    let mut result : Vec<String> = Vec::new();
+    for f in files {
+        //println!("file : {}", f.unwrap());
+        result.push(f.unwrap());
+    }
+    
+    Ok(result)
+}
+
+fn sqlite_search_file(dbpath: &str, key: String) -> Result<Vec<XrefInfo>> {
+    let files = sqlite_get_file2(&dbpath, key.clone(), true).unwrap();
+    let mut result : Vec<XrefInfo> = Vec::new();
+    //println!("{:#?}", files);
+    for f in files {
+        let path = get_fullpath(&dbpath, &f);
+        result.push(XrefInfo {
+            line : format!("{}:{}:{}", path, 1, key),
+            linum : 1,
+            filepath : path,
+            priority : 0
+        })
+    }
+
+    return Ok(result);
+}
+ 
 fn sqlite_get_define(dbpath : &str, key : String, pattern : bool) -> Result<Vec<XrefInfo>> {
     let sqlquery = format!("SELECT DISTINCT key,dat FROM db WHERE KEY {}", pattern_query(&key, pattern));
     let conn = Connection::open(get_fullpath(dbpath, "GTAGS"))?;
@@ -397,15 +432,18 @@ fn main() {
     //println!("result : {}", result);
     //println!("args {:?}", opengrok_args);
     let dbpath = opengrok_args.project;
-    match (opengrok_args.define.len() != 0, opengrok_args.reference.len() != 0, opengrok_args.text.len() != 0){
-        (true, false, false) => {
+    match (opengrok_args.define.len() != 0, opengrok_args.reference.len() != 0, opengrok_args.text.len() != 0, opengrok_args.filename.len() != 0) {
+        (true, false, false, false) => {
             output_xrefs(&sort_with_prio(sqlite_get_define(&dbpath, opengrok_args.define, false).unwrap(), opengrok_args.workfile));
         }
-        (false, true, false) => {
+        (false, true, false, false) => {
             output_xrefs(&sort_with_prio(sqlite_get_symbol(&dbpath, opengrok_args.reference, false).unwrap(), opengrok_args.workfile));
         }
-        (false, false, true) => {
+        (false, false, true, false) => {
             output_xrefs(&sort_with_prio(sqlite_get_text(&dbpath, opengrok_args.text).unwrap(), opengrok_args.workfile));
+        }
+        (false, false, false, true) => {
+            output_xrefs(&sort_with_prio(sqlite_search_file(&dbpath, opengrok_args.filename).unwrap(), opengrok_args.workfile))
         }
         _ => {
             println!("define len {}, reference len {}, text len {}", 
